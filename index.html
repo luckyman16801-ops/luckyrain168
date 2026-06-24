@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#071015">
+    <meta
+      name="description"
+      content="MR TP AI Weather is a Phnom Penh focused weather monitoring platform with regional cloud risk scanning, radar, and Telegram alerts."
+    >
+    <title>MR TP AI Weather | Phnom Penh Rain Monitor</title>
+    <link rel="preconnect" href="https://api.open-meteo.com">
+    <link rel="preconnect" href="https://tilecache.rainviewer.com">
+    <link rel="preconnect" href="https://unpkg.com">
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIINfQgy8dU4P9tWW3c/6qJcYdYL1p4E2d4="
+      crossorigin=""
+    >
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <noscript>
+      <div class="noscript">MR TP AI Weather requires JavaScript to load live weather, radar, and risk data.</div>
+    </noscript>
+
+    <header class="topbar">
+      <a class="brand" href="#overview" aria-label="MR TP AI Weather home">
+        <span class="brand-mark">MR</span>
+        <span>
+          <strong>MR TP AI Weather</strong>
+          <small data-i18n="brandSubtitle">Phnom Penh 100 km rain intelligence</small>
+        </span>
+      </a>
+
+      <nav class="nav" aria-label="Dashboard sections">
+        <a href="#overview" data-i18n="navOverview">Overview</a>
+        <a href="#scan" data-i18n="navScan">Risk Scan</a>
+        <a href="#radar" data-i18n="navRadar">Radar</a>
+      </nav>
+
+      <div class="toolbar">
+        <button class="icon-button" id="refreshButton" type="button" title="Refresh weather" aria-label="Refresh weather">
+          <span aria-hidden="true">↻</span>
+        </button>
+        <div class="segmented" role="group" aria-label="Language">
+          <button type="button" data-lang="en" class="active">EN</button>
+          <button type="button" data-lang="km">ខ្មែរ</button>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <section id="overview" class="hero section-grid">
+        <div class="hero-copy">
+          <p class="eyebrow" data-i18n="eyebrow">Live AI weather operations</p>
+          <h1 data-i18n="heroTitle">Phnom Penh Rain Confidence Command</h1>
+          <p data-i18n="heroText">
+            Real-time Open-Meteo forecasting, 16-direction regional cloud risk scanning, and radar animation for the next 1-3 hours.
+          </p>
+          <div class="hero-actions">
+            <a class="primary-action" href="#scan" data-i18n="viewScan">View regional scan</a>
+            <a class="secondary-action" href="#radar" data-i18n="viewRadar">Open radar</a>
+          </div>
+        </div>
+
+        <article class="confidence-panel" aria-live="polite">
+          <div class="panel-head">
+            <span data-i18n="confidence">AI Rain Confidence</span>
+            <strong id="riskLevel">--</strong>
+          </div>
+          <div class="confidence-ring" style="--confidence: 0">
+            <span id="confidenceValue">--%</span>
+          </div>
+          <p id="riskSummary" data-i18n="loading">Loading live weather intelligence...</p>
+          <div class="status-strip">
+            <span id="activeSectors">--</span>
+            <span data-i18n="activeSectors">active sectors</span>
+          </div>
+        </article>
+      </section>
+
+      <section class="metrics-grid" aria-label="Current weather metrics">
+        <article class="metric-card">
+          <span data-i18n="temperature">Temperature</span>
+          <strong id="temperature">--</strong>
+        </article>
+        <article class="metric-card">
+          <span data-i18n="humidity">Humidity</span>
+          <strong id="humidity">--</strong>
+        </article>
+        <article class="metric-card">
+          <span data-i18n="pressure">Pressure</span>
+          <strong id="pressure">--</strong>
+        </article>
+        <article class="metric-card">
+          <span data-i18n="wind">Wind</span>
+          <strong id="wind">--</strong>
+        </article>
+        <article class="metric-card">
+          <span data-i18n="rainProbability">Rain probability</span>
+          <strong id="rainProbability">--</strong>
+        </article>
+        <article class="metric-card">
+          <span data-i18n="updated">Updated</span>
+          <strong id="updatedAt">--</strong>
+        </article>
+      </section>
+
+      <section class="content-grid">
+        <article id="scan" class="surface compass-surface">
+          <div class="section-title">
+            <p class="eyebrow" data-i18n="scanEyebrow">100 km radius</p>
+            <h2 data-i18n="scanTitle">Regional Cloud Risk Scan</h2>
+          </div>
+          <div class="compass-layout">
+            <canvas id="stormCompass" width="720" height="720" aria-label="Storm Compass Pro risk visualization"></canvas>
+            <div class="legend">
+              <span><i class="dot low"></i><span data-i18n="lowRisk">Low</span></span>
+              <span><i class="dot medium"></i><span data-i18n="mediumRisk">Medium</span></span>
+              <span><i class="dot high"></i><span data-i18n="highRisk">High</span></span>
+            </div>
+          </div>
+        </article>
+
+        <article class="surface">
+          <div class="section-title">
+            <p class="eyebrow" data-i18n="sectorEyebrow">16 direction scan</p>
+            <h2 data-i18n="sectorTitle">Sector Status</h2>
+          </div>
+          <div class="sector-list" id="sectorList" aria-live="polite"></div>
+        </article>
+      </section>
+
+      <section class="content-grid radar-grid">
+        <article id="radar" class="surface radar-surface">
+          <div class="section-title">
+            <p class="eyebrow" data-i18n="radarEyebrow">RainViewer integration</p>
+            <h2 data-i18n="radarTitle">Live Radar</h2>
+          </div>
+          <div id="radarMap" class="radar-map" role="application" aria-label="RainViewer radar map"></div>
+          <div class="map-controls">
+            <button type="button" id="playRadar" class="control-button" data-i18n="playRadar">Play radar</button>
+            <label class="switch">
+              <input type="checkbox" id="satelliteLayer">
+              <span data-i18n="satelliteLayer">Satellite layer</span>
+            </label>
+          </div>
+        </article>
+
+        <article class="surface forecast-surface">
+          <div class="section-title">
+            <p class="eyebrow" data-i18n="forecastEyebrow">Next 12 hours</p>
+            <h2 data-i18n="forecastTitle">Weather Forecast</h2>
+          </div>
+          <div id="forecastCards" class="forecast-cards"></div>
+        </article>
+      </section>
+    </main>
+
+    <footer>
+      <span>MR TP AI Weather</span>
+      <span data-i18n="footer">Open-Meteo forecast data and RainViewer radar layers. Not for life-safety decisions.</span>
+    </footer>
+
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+      defer
+    ></script>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
