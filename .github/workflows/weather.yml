@@ -1,1 +1,34 @@
-C:\Users\RPC\Documents\Codex\2026-06-24\project-cambodia-rain-8888-pro-v3\.github\workflows\weather.yml
+name: MR TP AI Weather Alerts
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weather-alerts
+  cancel-in-progress: false
+
+jobs:
+  telegram-alert:
+    name: Evaluate rain risk and send Telegram alert
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run weather alert engine
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ALERT_MIN_LEVEL: LOW
+        run: python telegram.py
