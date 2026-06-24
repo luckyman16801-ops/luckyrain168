@@ -1,103 +1,3 @@
-export const CENTER = Object.freeze({
-  name: "Phnom Penh, Cambodia",
-  latitude: 11.5689,
-  longitude: 104.9156,
-  radiusKm: 100,
-});
-
-export const DIRECTIONS = Object.freeze([
-  { label: "N", bearing: 0 },
-  { label: "NNE", bearing: 22.5 },
-  { label: "NE", bearing: 45 },
-  { label: "ENE", bearing: 67.5 },
-  { label: "E", bearing: 90 },
-  { label: "ESE", bearing: 112.5 },
-  { label: "SE", bearing: 135 },
-  { label: "SSE", bearing: 157.5 },
-  { label: "S", bearing: 180 },
-  { label: "SSW", bearing: 202.5 },
-  { label: "SW", bearing: 225 },
-  { label: "WSW", bearing: 247.5 },
-  { label: "W", bearing: 270 },
-  { label: "WNW", bearing: 292.5 },
-  { label: "NW", bearing: 315 },
-  { label: "NNW", bearing: 337.5 },
-]);
-
-const OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast";
-const FORECAST_FIELDS = [
-  "temperature_2m",
-  "relative_humidity_2m",
-  "precipitation_probability",
-  "cloud_cover",
-  "surface_pressure",
-  "wind_speed_10m",
-  "wind_direction_10m",
-].join(",");
-
-export class WeatherClient {
-  constructor(fetchImpl = fetch) {
-    this.fetchImpl = fetchImpl;
-  }
-
-  async loadWeatherModel() {
-    const locations = buildScanLocations(CENTER);
-    const responses = await Promise.all(
-      locations.map((location) => this.fetchForecast(location.latitude, location.longitude))
-    );
-    const [centerForecast, ...sectorForecasts] = responses;
-    const current = normalizeCurrent(centerForecast);
-    const sectors = sectorForecasts.map((forecast, index) =>
-      buildSectorRisk(DIRECTIONS[index], forecast, current)
-    );
-    const confidence = calculateRainConfidence(current, sectors);
-
-    return {
-      center: CENTER,
-      current,
-      sectors,
-      confidence,
-      forecast: buildHourlyForecast(centerForecast),
-      loadedAt: new Date(),
-    };
-  }
-
-  async fetchForecast(latitude, longitude) {
-    assertCoordinate(latitude, "latitude", -90, 90);
-    assertCoordinate(longitude, "longitude", -180, 180);
-
-    const params = new URLSearchParams({
-      latitude: latitude.toFixed(5),
-      longitude: longitude.toFixed(5),
-      timezone: "Asia/Phnom_Penh",
-      forecast_days: "2",
-      current: FORECAST_FIELDS,
-      hourly: FORECAST_FIELDS,
-    });
-
-    const response = await this.fetchImpl(`${OPEN_METEO_URL}?${params}`);
-    if (!response.ok) {
-      throw new Error(`Open-Meteo request failed with ${response.status}`);
-    }
-
-    const payload = await response.json();
-    if (!payload.current || !payload.hourly) {
-      throw new Error("Open-Meteo response did not include current and hourly weather data");
-    }
-    return payload;
-  }
-}
-
-export function buildScanLocations(center) {
-  return [
-    center,
-    ...DIRECTIONS.map((direction) => ({
-      ...destinationPoint(center.latitude, center.longitude, direction.bearing, center.radiusKm),
-      direction: direction.label,
-    })),
-  ];
-}
-
 export function destinationPoint(latitude, longitude, bearingDeg, distanceKm) {
   const earthRadiusKm = 6371.0088;
   const angularDistance = distanceKm / earthRadiusKm;
@@ -150,7 +50,7 @@ export function calculateRainConfidence(current, sectors) {
 function normalizeCurrent(forecast) {
   const current = forecast.current;
   const hourly = forecast.hourly;
-  const currentIndex = Math.max(0, hourly.time.indexOf(current.time));
+  const currentIndex = nearestTimeIndex(hourly.time, current.time);
   const previousIndex = Math.max(0, currentIndex - 3);
 
   return {
@@ -169,8 +69,8 @@ function normalizeCurrent(forecast) {
 
 function buildSectorRisk(direction, forecast, current) {
   const hour = forecast.hourly;
-  const nowIndex = Math.max(0, hour.time.indexOf(forecast.current.time));
-  const lookahead = sliceWindow(nowIndex, 4);
+  const nowIndex = nearestTimeIndex(hour.time, forecast.current.time);
+  const lookahead = sliceWindow(nowIndex, 4, hour.time.length);
   const cloudCover = average(lookahead.map((index) => numberOrZero(hour.cloud_cover?.[index])));
   const rainProbability = average(
     lookahead.map((index) => numberOrZero(hour.precipitation_probability?.[index]))
@@ -209,8 +109,8 @@ function buildSectorRisk(direction, forecast, current) {
 
 function buildHourlyForecast(forecast) {
   const hour = forecast.hourly;
-  const start = Math.max(0, hour.time.indexOf(forecast.current.time));
-  return sliceWindow(start, 12).map((index) => ({
+  const start = nearestTimeIndex(hour.time, forecast.current.time);
+  return sliceWindow(start, 12, hour.time.length).map((index) => ({
     time: hour.time[index],
     temperature: Math.round(numberOrZero(hour.temperature_2m?.[index])),
     humidity: Math.round(numberOrZero(hour.relative_humidity_2m?.[index])),
@@ -255,8 +155,26 @@ function buildSummary(score) {
   return "Rain signal is limited across the 100 km scan. Continue normal monitoring.";
 }
 
-function sliceWindow(start, length) {
-  return Array.from({ length }, (_, offset) => start + offset);
+function nearestTimeIndex(times, target) {
+  if (!Array.isArray(times) || !times.length) return 0;
+  const exact = times.indexOf(target);
+  if (exact >= 0) return exact;
+
+  const targetMinutes = timeToMinutes(target);
+  const distances = times.map((value) => Math.abs(timeToMinutes(value) - targetMinutes));
+  return distances.indexOf(Math.min(...distances));
+}
+
+function sliceWindow(start, length, total = Number.POSITIVE_INFINITY) {
+  const end = Math.min(total, start + length);
+  return Array.from({ length: Math.max(0, end - start) }, (_, offset) => start + offset);
+}
+
+function timeToMinutes(value) {
+  const match = String(value).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  if (!match) return 0;
+  const [, year, month, day, hour, minute] = match.map(Number);
+  return (((year * 12 + month) * 31 + day) * 24 + hour) * 60 + minute;
 }
 
 function average(values) {
