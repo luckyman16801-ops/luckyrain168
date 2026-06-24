@@ -1,153 +1,3 @@
-#!/usr/bin/env python3
-"""MR TP AI Weather Telegram alert runner.
-
-This script is designed for GitHub Actions. It reads Telegram credentials from
-environment variables, evaluates Open-Meteo weather risk around Phnom Penh, and
-sends a LOW, MEDIUM, or HIGH alert without hardcoded secrets.
-"""
-
-from __future__ import annotations
-
-import json
-import math
-import os
-import sys
-import time
-import urllib.error
-import urllib.parse
-import urllib.request
-from dataclasses import dataclass
-from typing import Any
-
-
-CENTER_LATITUDE = 11.5689
-CENTER_LONGITUDE = 104.9156
-RADIUS_KM = 100
-TIMEZONE = "Asia/Phnom_Penh"
-DIRECTIONS = [
-    ("N", 0),
-    ("NNE", 22.5),
-    ("NE", 45),
-    ("ENE", 67.5),
-    ("E", 90),
-    ("ESE", 112.5),
-    ("SE", 135),
-    ("SSE", 157.5),
-    ("S", 180),
-    ("SSW", 202.5),
-    ("SW", 225),
-    ("WSW", 247.5),
-    ("W", 270),
-    ("WNW", 292.5),
-    ("NW", 315),
-    ("NNW", 337.5),
-]
-
-
-@dataclass(frozen=True)
-class SectorRisk:
-    direction: str
-    cloud_cover: int
-    rain_probability: int
-    risk_score: int
-    status: str
-
-
-def main() -> int:
-    token = require_env("TELEGRAM_BOT_TOKEN")
-    chat_id = require_env("TELEGRAM_CHAT_ID")
-    minimum_level = os.getenv("ALERT_MIN_LEVEL", "LOW").upper()
-
-    try:
-        model = build_weather_model()
-        if level_rank(model["level"]) >= level_rank(minimum_level):
-            send_telegram(token, chat_id, format_message(model))
-        print(json.dumps(model, ensure_ascii=False))
-        return 0
-    except Exception as exc:
-        print(f"weather alert failed: {exc}", file=sys.stderr)
-        return 1
-
-
-def build_weather_model() -> dict[str, Any]:
-    center_forecast = fetch_forecast(CENTER_LATITUDE, CENTER_LONGITUDE)
-    current = normalize_current(center_forecast)
-    sectors = []
-
-    for direction, bearing in DIRECTIONS:
-        lat, lon = destination_point(CENTER_LATITUDE, CENTER_LONGITUDE, bearing, RADIUS_KM)
-        forecast = fetch_forecast(lat, lon)
-        sectors.append(build_sector_risk(direction, bearing, forecast, current))
-
-    confidence = calculate_confidence(current, sectors)
-    return {
-        "location": "Phnom Penh",
-        "level": confidence["level"],
-        "confidence": confidence["score"],
-        "active_sectors": confidence["active_sectors"],
-        "current": current,
-        "sectors": [sector.__dict__ for sector in sectors],
-    }
-
-
-def fetch_forecast(latitude: float, longitude: float) -> dict[str, Any]:
-    params = urllib.parse.urlencode(
-        {
-            "latitude": f"{latitude:.5f}",
-            "longitude": f"{longitude:.5f}",
-            "timezone": TIMEZONE,
-            "forecast_days": "2",
-            "current": "temperature_2m,relative_humidity_2m,precipitation_probability,cloud_cover,surface_pressure,wind_speed_10m,wind_direction_10m",
-            "hourly": "temperature_2m,relative_humidity_2m,precipitation_probability,cloud_cover,surface_pressure,wind_speed_10m,wind_direction_10m",
-        }
-    )
-    return request_json(f"https://api.open-meteo.com/v1/forecast?{params}")
-
-
-def request_json(url: str, attempts: int = 3) -> dict[str, Any]:
-    last_error: Exception | None = None
-    for attempt in range(1, attempts + 1):
-        try:
-            with urllib.request.urlopen(url, timeout=25) as response:
-                if response.status >= 400:
-                    raise RuntimeError(f"HTTP {response.status}")
-                return json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, TimeoutError, RuntimeError) as exc:
-            last_error = exc
-            if attempt < attempts:
-                time.sleep(2 * attempt)
-    raise RuntimeError(f"request failed after {attempts} attempts: {last_error}")
-
-
-def normalize_current(forecast: dict[str, Any]) -> dict[str, float]:
-    current = forecast["current"]
-    hourly = forecast["hourly"]
-    current_index = max(0, hourly["time"].index(current["time"]))
-    previous_index = max(0, current_index - 3)
-    return {
-        "temperature": number(current.get("temperature_2m")),
-        "humidity": number(current.get("relative_humidity_2m")),
-        "rain_probability": number(current.get("precipitation_probability")),
-        "cloud_cover": number(current.get("cloud_cover")),
-        "pressure": number(current.get("surface_pressure")),
-        "pressure_trend": number(current.get("surface_pressure")) - number(hourly["surface_pressure"][previous_index]),
-        "wind_speed": number(current.get("wind_speed_10m")),
-        "wind_direction": number(current.get("wind_direction_10m")),
-    }
-
-
-def build_sector_risk(direction: str, bearing: float, forecast: dict[str, Any], current: dict[str, float]) -> SectorRisk:
-    hourly = forecast["hourly"]
-    now = max(0, hourly["time"].index(forecast["current"]["time"]))
-    indexes = range(now, now + 4)
-    cloud_cover = average(number(hourly["cloud_cover"][index]) for index in indexes)
-    rain_probability = average(number(hourly["precipitation_probability"][index]) for index in indexes)
-    humidity = average(number(hourly["relative_humidity_2m"][index]) for index in indexes)
-    wind_speed = average(number(hourly["wind_speed_10m"][index]) for index in indexes)
-    directional_influence = bearing_similarity(current["wind_direction"], bearing)
-    risk_score = clamp(
-        round(
-            cloud_cover * 0.32
             + rain_probability * 0.38
             + humidity * 0.12
             + wind_speed_score(wind_speed) * 0.08
@@ -163,6 +13,34 @@ def build_sector_risk(direction: str, bearing: float, forecast: dict[str, Any], 
         risk_score=risk_score,
         status=risk_level(risk_score),
     )
+
+
+def nearest_time_index(times: list[str], target: str) -> int:
+    if not times:
+        return 0
+    if target in times:
+        return times.index(target)
+
+    target_minutes = time_to_minutes(target)
+    distances = [abs(time_to_minutes(value) - target_minutes) for value in times]
+    return distances.index(min(distances))
+
+
+def safe_window(start: int, total: int, length: int) -> range:
+    end = min(total, start + length)
+    if end <= start:
+        return range(max(0, total - 1), total)
+    return range(start, end)
+
+
+def time_to_minutes(value: str) -> int:
+    try:
+        date_part, time_part = value.split("T", 1)
+        year, month, day = [int(part) for part in date_part.split("-")]
+        hour, minute = [int(part) for part in time_part[:5].split(":")]
+        return (((year * 12 + month) * 31 + day) * 24 + hour) * 60 + minute
+    except (ValueError, AttributeError):
+        return 0
 
 
 def calculate_confidence(current: dict[str, float], sectors: list[SectorRisk]) -> dict[str, Any]:
